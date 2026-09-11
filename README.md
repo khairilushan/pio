@@ -1,21 +1,28 @@
-# PIO — Pi Orchestrator
+# PIO: Pi Orchestrator
 
-PIO is a [Pi](https://github.com/earendil-works/pi) extension that plans, implements, reviews, and fixes coding tasks with isolated subagents.
+PIO is a [Pi](https://github.com/earendil-works/pi) extension that uses fresh subagents to plan, implement, review, and fix coding tasks.
 
-It runs in the background while your main Pi session stays available.
+PIO runs in the background, so the main Pi session remains available. It does not create Git worktrees or other filesystem sandboxes. All agents use the current working tree.
 
 ## Features
 
-- Repository-aware planning and plan review
-- Sequential writer agents for implementation
-- Two independent reviewers running in parallel
-- Automatic triage, fix, and verification rounds
-- Live phase, agent, model, tool, and progress visibility
-- Steering while an agent is running
+- Repository-aware context gathering and plan review
+- Sequential implementation agents
+- Two independent read-only reviewers running in parallel
+- Automatic finding triage, fix rounds, and read-only verification
+- Live phase, agent, model, tool, and progress status
+- Steering and answers for running or paused agents
 - Pi child-session and Claude Code process backends
-- A concise final report with the revised plan, findings, fix status, and validation notes
+- A final report with the plan, findings, validation results, and open issues
 
-PIO shares the current working tree with its workers. It never commits, pushes, publishes, or opens pull requests.
+PIO does not automatically commit, push, publish, or open pull requests. Agents are instructed not to do so. Only one run can be active per Pi session.
+
+## Requirements
+
+- Pi
+- Node.js 22.19 or later
+- An authenticated Pi model provider
+- Claude Code installed, authenticated, and on `PATH` when using the `claude-code` backend
 
 ## Install
 
@@ -36,46 +43,60 @@ Restart Pi or run `/reload`.
 
 ## Use
 
-Open Pi inside a Git repository:
+Run Pi in the project directory:
 
 ```text
 /pio Add pagination to search results and cover the changed behavior
 ```
 
-PIO gathers context, creates and critiques a plan, implements it, reviews the changes, fixes confirmed findings, and produces a final report.
+The task can be plain text or a reference to material available in the working tree. PIO does not provide a Jira or other remote task-source integration.
 
-Backends and models are selected from configuration for each role. Without role overrides, PIO uses Pi child sessions: a Pi session using Claude passes that exact model to its children, while a Pi session using an OpenAI model uses PIO's role-specific OpenAI defaults.
-
-Only one run can be active because all workers share the same working tree.
+PIO gathers context, creates and critiques a plan, implements its work items in order, reviews the changes, fixes confirmed findings, and writes a final report.
 
 ### Commands
 
 | Command | Purpose |
 |---|---|
-| `/pio <task>` | Start using the configured role backends and models |
-| `/pio-status` | Show progress and active agents |
+| `/pio <task>` | Start a run using the configured role backends and models |
+| `/pio-status` | Show the current phase and active agents |
 | `/pio-steer` | Send an instruction to a running agent |
-| `/pio-answer <answer>` | Answer a blocking question |
-| `/pio-abort` | Stop the run |
-| `/pio-log` | Inspect activity by agent role |
-| `/pio-report` | Reopen the final report |
+| `/pio-answer <answer>` | Answer a question that paused the run |
+| `/pio-abort` | Stop the run and its active agents |
+| `/pio-log` | Inspect retained activity by agent role |
+| `/pio-report` | Show the final report again |
 
-## Backends
+Run state and activity are kept in memory for the current Pi session. Reports are not persisted by PIO.
 
-PIO uses isolated Pi child sessions by default. Each role uses its configured model, or falls back to Pi's active model when necessary.
+## Pipeline
 
-To run a role through the external Claude Code CLI, set its backend to `claude-code`. Claude Code must already be installed, authenticated, and available on `PATH`.
+| Phase | Work |
+|---|---|
+| 1 | Record task and workspace state |
+| 2 | Gather read-only repository context |
+| 3 | Create an implementation plan |
+| 4 | Critique and approve the plan |
+| 5 | Implement up to five work items in order |
+| 6 | Run two reviews, triage findings, and apply up to three fix rounds |
+| 7 | Inspect the workspace and write the final report |
 
-Roles are configured independently, so you can mix backends—for example, a Claude Code planner with a GPT writer running in Pi.
+## Backends and models
 
-> **Warning:** Claude Code workers use `--dangerously-skip-permissions`. They can edit files and run commands without permission prompts. Use this only in environments you trust.
+PIO uses Pi child sessions by default. `auto` currently resolves to the Pi backend; it does not detect Claude Code automatically.
+
+Each role has its own backend, provider, model, and effort. Without a model override, a non-OpenAI Pi session passes its active model to child sessions. OpenAI sessions use PIO's role defaults. If a configured Pi model is unavailable, PIO may fall back to another available model and record that in the final report. Pi may also clamp the requested effort level.
+
+To use Claude Code for a role, set its backend to `claude-code`. Claude Code workers run with `--dangerously-skip-permissions`, so they can edit files and run commands without permission prompts. Use this only in a trusted environment. Pi writer and fixer workers can also edit files and run commands.
 
 ## Configuration
 
-Configuration is optional. Use either:
+Configuration is optional. PIO loads these sources in order, with later values taking precedence:
 
-- `~/.pi/agent/pio.json` for global settings
-- `.pi/pio.json` for settings in a trusted project
+1. Built-in defaults
+2. `~/.pi/agent/pio.json`
+3. `.pi/pio.json` in a trusted project
+4. A per-run `config` override supplied to the `pio` tool
+
+The project file is ignored when the project is not trusted. Configuration files must contain valid JSON.
 
 Example:
 
@@ -98,19 +119,27 @@ Example:
 }
 ```
 
-Backends are `auto`, `pi`, and `claude-code`. Model names are passed directly to the selected runtime and are not allowlisted.
+`defaults` applies to every role, and a role entry overrides it. Roles are `context`, `planner`, `critic`, `plan-reviser`, `writer`, `reviewer-correctness`, `reviewer-resilience`, `review-triage`, `fixer`, and `verifier`.
+
+Backends are `auto`, `pi`, and `claude-code`. Efforts are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Claude model names are passed to Claude Code. Pi models must be available to Pi's model registry.
+
+## Working tree and validation
+
+Agents share the current working tree. PIO does not make a snapshot or undo changes. Writer and fixer agents may edit files; context, planning, critic, reviewer, triage, and verifier agents are read-only. Avoid editing the same files from the main session while a run is active.
+
+A `completed` run means the pipeline finished, not that every check passed. Writer and fixer agents report allowed focused validation. Reviewers and verifiers do not run builds, tests, linters, apps, or snapshots. Read the final report for failed or skipped validation and unresolved findings. Suggestions are reported but are not applied automatically.
 
 ## Final report
 
 A completed run reports:
 
 - The final revised plan
-- All review findings and their fix status
+- Review findings and their status
 - Suggestions and open questions
 - Failed or skipped validation
 - Unresolved issues and important caveats
 
-Use `/pio-report` to show it again in the same session.
+Use `/pio-report` to show it again during the same Pi session.
 
 ## Development
 
