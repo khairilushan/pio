@@ -22,13 +22,13 @@ PIO shares the current working tree with its workers. It never commits, pushes, 
 From GitHub:
 
 ```sh
-pi install git:github.com/YOUR_USERNAME/pio
+pi install git:github.com/khairilushan/pio
 ```
 
 From a local clone:
 
 ```sh
-git clone https://github.com/YOUR_USERNAME/pio.git
+git clone https://github.com/khairilushan/pio.git
 pi install ./pio
 ```
 
