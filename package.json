@@ -1,0 +1,45 @@
+{
+  "name": "pio",
+  "version": "0.1.0",
+  "description": "Observable, steerable multi-agent orchestration for Pi",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "orchestration",
+    "subagents"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc"
+  },
+  "files": [
+    "index.ts",
+    "config.ts",
+    "claude-code.ts",
+    "engine.ts",
+    "prompts.ts",
+    "types.ts",
+    "ui.ts",
+    "tsconfig.json",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@earendil-works/pi-tui": "^0.85.1",
+    "typebox": "^1.3.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
