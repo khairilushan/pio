@@ -8,7 +8,7 @@ PIO runs in the background, so the main Pi session remains available. It does no
 
 - Repository-aware context gathering and plan review
 - Sequential implementation agents
-- Two independent read-only reviewers running in parallel
+- Three independent read-only reviewers running in parallel
 - Automatic finding triage, fix rounds, and read-only verification
 - Live phase, agent, model, tool, and progress status
 - Steering and answers for running or paused agents
@@ -76,8 +76,20 @@ Run state and activity are kept in memory for the current Pi session. Reports ar
 | 3 | Create an implementation plan |
 | 4 | Critique and approve the plan |
 | 5 | Implement up to five work items in order |
-| 6 | Run two reviews, triage findings, and apply up to three fix rounds |
+| 6 | Run three reviews, triage findings, and apply up to three fix rounds |
 | 7 | Inspect the workspace and write the final report |
+
+The three initial reviewers use intentionally separate lenses:
+
+| Role | Exclusive focus |
+|---|---|
+| `reviewer-correctness` | Expected-path behavior, data/API contracts, consumers, compilation, and integration wiring |
+| `reviewer-resilience` | Adverse inputs and states, failures, concurrency, cleanup, security, accessibility, and regression coverage |
+| `reviewer-simplicity` | Abstraction and state complexity, dead code, existing-pattern reuse, and performance design |
+
+Their prompts explicitly tell them not to report concerns owned by another lens. They run concurrently; if any reviewer reports must-fixes, `review-triage` verifies and deduplicates them before a fixer is allowed to edit the workspace.
+
+PIO never truncates must-fixes. It retains and reports every finding, while triage, fixing, and verification process them in batches of ten to keep each agent prompt focused. Fixing still stops after three rounds; anything remaining is reported as unresolved rather than discarded. Suggestions and questions remain capped at six each.
 
 ## Backends and models
 
@@ -98,30 +110,106 @@ Configuration is optional. PIO loads these sources in order, with later values t
 
 The project file is ignored when the project is not trusted. Configuration files must contain valid JSON.
 
-Example:
+### Complete multi-provider example
+
+The following file customizes every role and uses provider/model identifiers from Pi 0.85.1's built-in catalog. It also uses the `fable`, `opus`, and `sonnet` model aliases accepted by Claude Code, which resolve to the latest versions available to that CLI and account.
 
 ```json
 {
-  "backend": "auto",
+  "backend": "pi",
+  "provider": "openai-codex",
   "claudeCodeExecutable": "claude",
-  "defaults": { "effort": "high" },
+  "defaults": {
+    "backend": "pi",
+    "provider": "openai-codex",
+    "model": "gpt-6-astra",
+    "effort": "high"
+  },
   "roles": {
+    "context": {
+      "backend": "pi",
+      "provider": "google",
+      "model": "gemini-3.8-flash",
+      "effort": "high"
+    },
     "planner": {
       "backend": "claude-code",
-      "model": "opus"
+      "model": "opus",
+      "effort": "max"
+    },
+    "critic": {
+      "backend": "pi",
+      "provider": "xai",
+      "model": "grok-4.6",
+      "effort": "xhigh"
+    },
+    "plan-reviser": {
+      "backend": "claude-code",
+      "model": "fable",
+      "effort": "max"
     },
     "writer": {
       "backend": "pi",
       "provider": "openai-codex",
-      "model": "gpt-5.6-terra"
+      "model": "gpt-6-astra",
+      "effort": "max"
+    },
+    "reviewer-correctness": {
+      "backend": "pi",
+      "provider": "opencode",
+      "model": "deepseek-v4-pro",
+      "effort": "max"
+    },
+    "reviewer-resilience": {
+      "backend": "pi",
+      "provider": "opencode",
+      "model": "kimi-k3",
+      "effort": "max"
+    },
+    "reviewer-simplicity": {
+      "backend": "pi",
+      "provider": "opencode",
+      "model": "claude-opus-5",
+      "effort": "max"
+    },
+    "review-triage": {
+      "backend": "pi",
+      "provider": "opencode",
+      "model": "glm-5.3",
+      "effort": "high"
+    },
+    "fixer": {
+      "backend": "claude-code",
+      "model": "sonnet",
+      "effort": "high"
+    },
+    "verifier": {
+      "backend": "pi",
+      "provider": "opencode",
+      "model": "gpt-6-astra",
+      "effort": "max"
     }
   }
 }
 ```
 
-`defaults` applies to every role, and a role entry overrides it. Roles are `context`, `planner`, `critic`, `plan-reviser`, `writer`, `reviewer-correctness`, `reviewer-resilience`, `review-triage`, `fixer`, and `verifier`.
+These are real identifiers known by the bundled Pi catalog:
 
-Backends are `auto`, `pi`, and `claude-code`. Efforts are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Claude model names are passed to Claude Code. Pi models must be available to Pi's model registry.
+| Service | PIO backend | Provider | Model identifiers shown above |
+|---|---|---|---|
+| Google Gemini | `pi` | `google` | `gemini-3.8-flash` |
+| xAI Grok | `pi` | `xai` | `grok-4.6` |
+| ChatGPT/Codex | `pi` | `openai-codex` | `gpt-6-astra` |
+| OpenCode Zen | `pi` | `opencode` | `claude-opus-5`, `deepseek-v4-pro`, `kimi-k3`, `glm-5.3`, `gpt-6-astra` |
+| Claude Code | `claude-code` | not used | `fable` (Fable 5 family), `opus`, `sonnet` |
+
+The example only works when every selected service is authenticated. Configure Google with `GEMINI_API_KEY` or `/login`, xAI with `XAI_API_KEY` or `/login xai`, ChatGPT/Codex through `/login`, OpenCode Zen with `OPENCODE_API_KEY` or `/login`, and Claude Code through its own login. You may remove or replace roles for services you do not use. Run `pi --list-models <search>` after authentication to confirm that a Pi-backed model is currently available; PIO falls back to the parent model when a configured Pi model is unavailable.
+
+Model catalogs evolve. The fixed identifiers above are verified against Pi 0.85.1. For a moving Gemini alias, Pi also knows `google` / `gemini-flash-latest`. For direct OpenAI API authentication, Pi knows `openai` / `gpt-6-astra` in addition to the `openai-codex` pairing used above.
+
+`defaults` applies to every role, and a role entry overrides it. Roles are `context`, `planner`, `critic`, `plan-reviser`, `writer`, `reviewer-correctness`, `reviewer-resilience`, `reviewer-simplicity`, `review-triage`, `fixer`, and `verifier`.
+
+Backends are `auto`, `pi`, and `claude-code`. Efforts are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Claude model names are passed to Claude Code; its currently accepted effort values are `low`, `medium`, `high`, `xhigh`, and `max`. Pi models must be available to Pi's model registry, and Pi may clamp unsupported effort levels.
 
 ## Working tree and validation
 

@@ -28,6 +28,7 @@ const ConfigOverrideSchema = Type.Object({
 		writer: Type.Optional(RoleConfigSchema),
 		"reviewer-correctness": Type.Optional(RoleConfigSchema),
 		"reviewer-resilience": Type.Optional(RoleConfigSchema),
+		"reviewer-simplicity": Type.Optional(RoleConfigSchema),
 		"review-triage": Type.Optional(RoleConfigSchema),
 		fixer: Type.Optional(RoleConfigSchema),
 		verifier: Type.Optional(RoleConfigSchema),

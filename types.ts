@@ -10,6 +10,7 @@ export type PioRole =
 	| "writer"
 	| "reviewer-correctness"
 	| "reviewer-resilience"
+	| "reviewer-simplicity"
 	| "review-triage"
 	| "fixer"
 	| "verifier";

@@ -19,15 +19,17 @@ import { defaultModelFor, loadPioConfig } from "./config.ts";
 import {
 	contextPrompt,
 	contextSystemPrompt,
+	correctnessReviewPrompt,
 	criticPrompt,
 	criticSystemPrompt,
 	fixerPrompt,
 	fixerSystemPrompt,
 	planPrompt,
 	plannerSystemPrompt,
-	reviewPrompt,
+	resilienceReviewPrompt,
 	reviewerSystemPrompt,
 	revisePlanPrompt,
+	simplicityReviewPrompt,
 	triagePrompt,
 	verifierPrompt,
 	verifierSystemPrompt,
@@ -61,6 +63,8 @@ const PHASES: Record<PioPhase, string> = {
 
 const MAX_ACTIVITY = 2_000;
 const MAX_DETAIL_CHARS = 12_000;
+const REVIEW_BATCH_SIZE = 10;
+const MAX_FIX_ROUNDS = 3;
 const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "bash", "pio_progress"];
 const WRITER_TOOLS = ["read", "grep", "find", "ls", "bash", "edit", "write", "pio_progress"];
 
@@ -223,14 +227,20 @@ function normalizeReceipt(value: any, workItem: string): ImplementationReceipt {
 
 function normalizeReview(value: any): ReviewResult {
 	const findings: ReviewFinding[] = Array.isArray(value?.mustFixes)
-		? value.mustFixes.slice(0, 10).map((finding: any, index: number) => ({
-				key: String(finding?.key ?? `finding-${index + 1}`),
-				title: String(finding?.title ?? "Untitled finding"),
-				path: typeof finding?.path === "string" ? finding.path : undefined,
-				line: typeof finding?.line === "number" ? finding.line : undefined,
-				impact: String(finding?.impact ?? "Impact not supplied"),
-				direction: String(finding?.direction ?? "Fix direction not supplied"),
-			}))
+		? value.mustFixes.map((finding: any) => {
+				const title = String(finding?.title ?? "Untitled finding");
+				const path = typeof finding?.path === "string" ? finding.path : undefined;
+				const line = typeof finding?.line === "number" ? finding.line : undefined;
+				const suppliedKey = typeof finding?.key === "string" ? finding.key.trim() : "";
+				return {
+					key: suppliedKey || [path ?? "unknown-path", line ?? "unknown-line", title].join("|"),
+					title,
+					path,
+					line,
+					impact: String(finding?.impact ?? "Impact not supplied"),
+					direction: String(finding?.direction ?? "Fix direction not supplied"),
+				};
+			})
 		: [];
 	return {
 		mustFixes: findings,
@@ -253,6 +263,14 @@ function dedupeFindings(findings: ReviewFinding[]): ReviewFinding[] {
 		if (!byKey.has(key)) byKey.set(key, finding);
 	}
 	return [...byKey.values()];
+}
+
+function findingBatches(findings: ReviewFinding[]): ReviewFinding[][] {
+	const batches: ReviewFinding[][] = [];
+	for (let index = 0; index < findings.length; index += REVIEW_BATCH_SIZE) {
+		batches.push(findings.slice(index, index + REVIEW_BATCH_SIZE));
+	}
+	return batches;
 }
 
 function isTransientFailure(error: unknown): boolean {
@@ -659,14 +677,14 @@ export class PioEngine {
 	}
 
 	private async reviewAndFix(run: RunState, ctx: ExtensionContext): Promise<void> {
-		const [correctnessOutput, resilienceOutput] = await Promise.all([
+		const [correctnessOutput, resilienceOutput, simplicityOutput] = await Promise.all([
 			this.runAgentWithRetry(run, ctx, {
 				role: "reviewer-correctness",
 				label: "Correctness and integration review",
 				tier: "reasoning",
 				focus: "Tracing behavior end to end across producers, consumers, and module boundaries",
 				systemPrompt: reviewerSystemPrompt("correctness and integration"),
-				prompt: reviewPrompt(run.task, run.baseline, "correctness and integration"),
+				prompt: correctnessReviewPrompt(run.task, run.baseline),
 				tools: READ_ONLY_TOOLS,
 			}),
 			this.runAgentWithRetry(run, ctx, {
@@ -675,32 +693,55 @@ export class PioEngine {
 				tier: "reasoning",
 				focus: "Inspecting regression coverage, edge cases, safety, accessibility, and resilience",
 				systemPrompt: reviewerSystemPrompt("tests, security, and resilience"),
-				prompt: reviewPrompt(run.task, run.baseline, "tests, security, and resilience"),
+				prompt: resilienceReviewPrompt(run.task, run.baseline),
+				tools: READ_ONLY_TOOLS,
+			}),
+			this.runAgentWithRetry(run, ctx, {
+				role: "reviewer-simplicity",
+				label: "Simplicity and reuse review",
+				tier: "reasoning",
+				focus: "Removing avoidable complexity and finding simpler existing patterns",
+				systemPrompt: reviewerSystemPrompt("simplicity, code quality, performance, and reuse"),
+				prompt: simplicityReviewPrompt(run.task, run.baseline),
 				tools: READ_ONLY_TOOLS,
 			}),
 		]);
 		const correctnessReview = normalizeReview(parseJson(correctnessOutput));
 		const resilienceReview = normalizeReview(parseJson(resilienceOutput));
+		const simplicityReview = normalizeReview(parseJson(simplicityOutput));
 		run.reviews.push(
 			{ source: "reviewer-correctness", stage: "initial", result: correctnessReview },
 			{ source: "reviewer-resilience", stage: "initial", result: resilienceReview },
+			{ source: "reviewer-simplicity", stage: "initial", result: simplicityReview },
 		);
 		this.trackReportedFindings(run, correctnessReview.mustFixes, "Correctness and integration review");
 		this.trackReportedFindings(run, resilienceReview.mustFixes, "Tests, security, and resilience review");
-		let findings = dedupeFindings([...correctnessReview.mustFixes, ...resilienceReview.mustFixes]);
+		this.trackReportedFindings(run, simplicityReview.mustFixes, "Simplicity and reuse review");
+		let findings = dedupeFindings([
+			...correctnessReview.mustFixes,
+			...resilienceReview.mustFixes,
+			...simplicityReview.mustFixes,
+		]);
 		if (findings.length > 0) {
-			const triageOutput = await this.runAgentWithRetry(run, ctx, {
-				role: "review-triage",
-				label: "Must-fix verification",
-				tier: "reasoning",
-				focus: "Verifying and deduplicating reviewer must-fixes against current code",
-				systemPrompt: reviewerSystemPrompt("finding verification"),
-				prompt: triagePrompt(run.task, findings),
-				tools: READ_ONLY_TOOLS,
-			});
-			const triageReview = normalizeReview(parseJson(triageOutput));
-			run.reviews.push({ source: "review-triage", stage: "triage", result: triageReview });
-			findings = dedupeFindings(triageReview.mustFixes);
+			const triageBatches = findingBatches(findings);
+			const verifiedFindings: ReviewFinding[] = [];
+			for (const [index, batch] of triageBatches.entries()) {
+				const batchIndex = index + 1;
+				const batchSuffix = triageBatches.length === 1 ? "" : ` batch ${batchIndex}/${triageBatches.length}`;
+				const triageOutput = await this.runAgentWithRetry(run, ctx, {
+					role: "review-triage",
+					label: `Must-fix verification${batchSuffix}`,
+					tier: "reasoning",
+					focus: `Verifying ${batch.length} reviewer must-fix${batch.length === 1 ? "" : "es"} against current code`,
+					systemPrompt: reviewerSystemPrompt("finding verification"),
+					prompt: triagePrompt(run.task, batch, batchIndex, triageBatches.length),
+					tools: READ_ONLY_TOOLS,
+				});
+				const triageReview = normalizeReview(parseJson(triageOutput));
+				run.reviews.push({ source: "review-triage", stage: "triage", result: triageReview });
+				verifiedFindings.push(...triageReview.mustFixes);
+			}
+			findings = dedupeFindings(verifiedFindings);
 			const verifiedKeys = new Set(findings.map((finding) => finding.key.toLowerCase()));
 			for (const tracked of run.trackedFindings) {
 				tracked.status = verifiedKeys.has(tracked.finding.key.toLowerCase()) ? "verified" : "not-confirmed";
@@ -708,42 +749,65 @@ export class PioEngine {
 			this.trackReportedFindings(run, findings, "Must-fix verification", "verified");
 		}
 
-		for (let round = 1; findings.length > 0 && round <= 3; round++) {
+		for (let round = 1; findings.length > 0 && round <= MAX_FIX_ROUNDS; round++) {
 			this.ensureRunning(run);
-			const fixedCandidates = findings;
-			const fixOutput = await this.runAgentWithRetry(run, ctx, {
-				role: "fixer",
-				label: `Review fix round ${round}`,
-				tier: "capable",
-				focus: `Addressing ${findings.length} verified must-fix${findings.length === 1 ? "" : "es"}`,
-				systemPrompt: fixerSystemPrompt(),
-				prompt: fixerPrompt(run.task, run.plan!, findings, run.baseline, round),
-				tools: WRITER_TOOLS,
-			});
-			run.receipts.push(normalizeReceipt(parseJson(fixOutput), `review-fix-${round}`));
-			await this.inspectAfterWrite(run, `review-fix-${round}`);
-
-			const verifyOutput = await this.runAgentWithRetry(run, ctx, {
-				role: "verifier",
-				label: `Review fix verifier ${round}`,
-				tier: "reasoning",
-				focus: "Confirming exact fixes and adjacent regressions",
-				systemPrompt: verifierSystemPrompt(),
-				prompt: verifierPrompt(run.task, findings, round),
-				tools: READ_ONLY_TOOLS,
-			});
-			const verification = normalizeReview(parseJson(verifyOutput));
-			run.reviews.push({ source: "verifier", stage: "verification", round, result: verification });
-			findings = dedupeFindings(verification.mustFixes);
-			const remainingKeys = new Set(findings.map((finding) => finding.key.toLowerCase()));
-			for (const candidate of fixedCandidates) {
-				const tracked = run.trackedFindings.find((item) => item.finding.key.toLowerCase() === candidate.key.toLowerCase());
-				if (tracked && !remainingKeys.has(candidate.key.toLowerCase())) {
-					tracked.status = "fixed";
-					tracked.fixedRound = round;
-				}
+			const fixBatches = findingBatches(findings);
+			for (const [index, batch] of fixBatches.entries()) {
+				const batchIndex = index + 1;
+				const batchSuffix = fixBatches.length === 1 ? "" : ` batch ${batchIndex}/${fixBatches.length}`;
+				const workItem = fixBatches.length === 1
+					? `review-fix-${round}`
+					: `review-fix-${round}-batch-${batchIndex}`;
+				const fixOutput = await this.runAgentWithRetry(run, ctx, {
+					role: "fixer",
+					label: `Review fix round ${round}${batchSuffix}`,
+					tier: "capable",
+					focus: `Addressing ${batch.length} verified must-fix${batch.length === 1 ? "" : "es"}`,
+					systemPrompt: fixerSystemPrompt(),
+					prompt: fixerPrompt(
+						run.task,
+						run.plan!,
+						batch,
+						run.baseline,
+						round,
+						batchIndex,
+						fixBatches.length,
+						workItem,
+					),
+					tools: WRITER_TOOLS,
+				});
+				run.receipts.push(normalizeReceipt(parseJson(fixOutput), workItem));
+				await this.inspectAfterWrite(run, workItem);
 			}
-			this.trackReportedFindings(run, findings, `Verification round ${round}`, "unresolved");
+
+			const unresolvedFindings: ReviewFinding[] = [];
+			for (const [index, batch] of fixBatches.entries()) {
+				const batchIndex = index + 1;
+				const batchSuffix = fixBatches.length === 1 ? "" : ` batch ${batchIndex}/${fixBatches.length}`;
+				const verifyOutput = await this.runAgentWithRetry(run, ctx, {
+					role: "verifier",
+					label: `Review fix verifier ${round}${batchSuffix}`,
+					tier: "reasoning",
+					focus: `Confirming ${batch.length} exact fix${batch.length === 1 ? "" : "es"} and adjacent regressions`,
+					systemPrompt: verifierSystemPrompt(),
+					prompt: verifierPrompt(run.task, batch, round, batchIndex, fixBatches.length),
+					tools: READ_ONLY_TOOLS,
+				});
+				const verification = normalizeReview(parseJson(verifyOutput));
+				run.reviews.push({ source: "verifier", stage: "verification", round, result: verification });
+				const batchUnresolved = dedupeFindings(verification.mustFixes);
+				const remainingKeys = new Set(batchUnresolved.map((finding) => finding.key.toLowerCase()));
+				for (const candidate of batch) {
+					const tracked = run.trackedFindings.find((item) => item.finding.key.toLowerCase() === candidate.key.toLowerCase());
+					if (tracked && !remainingKeys.has(candidate.key.toLowerCase())) {
+						tracked.status = "fixed";
+						tracked.fixedRound = round;
+					}
+				}
+				this.trackReportedFindings(run, batchUnresolved, `Verification round ${round}${batchSuffix}`, "unresolved");
+				unresolvedFindings.push(...batchUnresolved);
+			}
+			findings = dedupeFindings(unresolvedFindings);
 		}
 		run.unresolvedFindings = findings;
 		const unresolvedKeys = new Set(findings.map((finding) => finding.key.toLowerCase()));
@@ -1121,12 +1185,15 @@ export class PioEngine {
 			if (!receipt) throw new Error(`Completion gate failed: missing writer receipt for ${item.id}.`);
 			if (receipt.validation.length === 0) throw new Error(`Completion gate failed: ${item.id} did not report validation or a policy skip.`);
 		}
+		const requiredReviewers: PioRole[] = ["reviewer-correctness", "reviewer-resilience", "reviewer-simplicity"];
 		const reviewers = new Set(
 			run.agents
-				.filter((agent) => agent.status === "completed" && ["reviewer-correctness", "reviewer-resilience"].includes(agent.role))
+				.filter((agent) => agent.status === "completed" && requiredReviewers.includes(agent.role as PioRole))
 				.map((agent) => agent.role),
 		);
-		if (reviewers.size !== 2) throw new Error("Completion gate failed: the independent reviewer pair did not complete.");
+		if (reviewers.size !== requiredReviewers.length) {
+			throw new Error("Completion gate failed: the independent reviewer set did not complete.");
+		}
 		const completedFixers = run.agents.filter((agent) => agent.role === "fixer" && agent.status === "completed").length;
 		const completedVerifiers = run.agents.filter((agent) => agent.role === "verifier" && agent.status === "completed").length;
 		if (completedVerifiers < completedFixers) throw new Error("Completion gate failed: a fixer lacks a later fresh verifier.");
