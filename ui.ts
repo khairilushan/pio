@@ -5,7 +5,7 @@ export function createDashboard(run: () => RunState | undefined, requestRender: 
 	return {
 		render(width: number): string[] {
 			const current = run();
-			if (!current) return [];
+			if (!current || current.status === "completed" || current.status === "failed" || current.status === "aborted") return [];
 			const active = current.agents.filter((agent) => agent.status === "running");
 			const recentlyCompleted = current.agents.filter((agent) => agent.status !== "running").slice(-2);
 			const lines = [`PIO ${current.phase}/7 · ${current.phaseLabel} · ${current.status}`];
