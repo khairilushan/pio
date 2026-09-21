@@ -16,6 +16,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { ClaudeCodeRun } from "./claude-code.ts";
 import { defaultModelFor, loadPioConfig } from "./config.ts";
+import { dedupeFindings, findingBatches, normalizePlan, normalizeReview } from "./pipeline.ts";
 import {
 	contextPrompt,
 	contextSystemPrompt,
@@ -47,7 +48,6 @@ import type {
 	PioRole,
 	PioSnapshot,
 	ReviewFinding,
-	ReviewResult,
 	RunState,
 } from "./types.ts";
 
@@ -61,9 +61,8 @@ const PHASES: Record<PioPhase, string> = {
 	7: "Final inspection and report",
 };
 
-const MAX_ACTIVITY = 2_000;
+const RETAINED_ACTIVITY_LIMIT = 2_000;
 const MAX_DETAIL_CHARS = 12_000;
-const REVIEW_BATCH_SIZE = 10;
 const MAX_FIX_ROUNDS = 3;
 const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "bash", "pio_progress"];
 const WRITER_TOOLS = ["read", "grep", "find", "ls", "bash", "edit", "write", "pio_progress"];
@@ -159,34 +158,6 @@ function parseJson<T>(text: string): T {
 	}
 }
 
-function normalizePlan(value: any): ApprovedPlan {
-	if (!value || typeof value.objective !== "string" || !Array.isArray(value.workItems)) {
-		throw new Error("Planner response is missing objective or workItems");
-	}
-	if (value.workItems.length < 1 || value.workItems.length > 5) {
-		throw new Error(`Planner returned ${value.workItems.length} work items; expected 1-5`);
-	}
-	const workItems = value.workItems.map((item: any, index: number) => {
-		if (!item || typeof item.title !== "string" || typeof item.description !== "string") {
-			throw new Error(`Planner work item ${index + 1} is malformed`);
-		}
-		return {
-			id: typeof item.id === "string" ? item.id : `W${index + 1}`,
-			title: item.title,
-			description: item.description,
-			files: Array.isArray(item.files) ? item.files.map(String) : [],
-			dependencies: Array.isArray(item.dependencies) ? item.dependencies.map(String) : [],
-			completionCriteria: Array.isArray(item.completionCriteria) ? item.completionCriteria.map(String) : [],
-			validation: Array.isArray(item.validation) ? item.validation.map(String) : [],
-		};
-	});
-	return {
-		objective: value.objective,
-		workItems,
-		assumptions: Array.isArray(value.assumptions) ? value.assumptions.map(String) : [],
-	};
-}
-
 function normalizeCritic(value: any): CriticResult {
 	if (!value || !["accepted", "revise", "blocked"].includes(value.disposition)) {
 		throw new Error("Critic response has an invalid disposition");
@@ -223,54 +194,6 @@ function normalizeReceipt(value: any, workItem: string): ImplementationReceipt {
 		validation,
 		concerns,
 	};
-}
-
-function normalizeReview(value: any): ReviewResult {
-	const findings: ReviewFinding[] = Array.isArray(value?.mustFixes)
-		? value.mustFixes.map((finding: any) => {
-				const title = String(finding?.title ?? "Untitled finding");
-				const path = typeof finding?.path === "string" ? finding.path : undefined;
-				const line = typeof finding?.line === "number" ? finding.line : undefined;
-				const suppliedKey = typeof finding?.key === "string" ? finding.key.trim() : "";
-				return {
-					key: suppliedKey || [path ?? "unknown-path", line ?? "unknown-line", title].join("|"),
-					title,
-					path,
-					line,
-					impact: String(finding?.impact ?? "Impact not supplied"),
-					direction: String(finding?.direction ?? "Fix direction not supplied"),
-				};
-			})
-		: [];
-	return {
-		mustFixes: findings,
-		suggestions: Array.isArray(value?.suggestions)
-			? value.suggestions.slice(0, 6).map((suggestion: any) => ({
-					title: String(suggestion?.title ?? "Suggestion"),
-					path: typeof suggestion?.path === "string" ? suggestion.path : undefined,
-					reason: String(suggestion?.reason ?? ""),
-				}))
-			: [],
-		questions: Array.isArray(value?.questions) ? value.questions.slice(0, 6).map(String) : [],
-		summary: typeof value?.summary === "string" ? value.summary : "",
-	};
-}
-
-function dedupeFindings(findings: ReviewFinding[]): ReviewFinding[] {
-	const byKey = new Map<string, ReviewFinding>();
-	for (const finding of findings) {
-		const key = finding.key.trim().toLowerCase();
-		if (!byKey.has(key)) byKey.set(key, finding);
-	}
-	return [...byKey.values()];
-}
-
-function findingBatches(findings: ReviewFinding[]): ReviewFinding[][] {
-	const batches: ReviewFinding[][] = [];
-	for (let index = 0; index < findings.length; index += REVIEW_BATCH_SIZE) {
-		batches.push(findings.slice(index, index + REVIEW_BATCH_SIZE));
-	}
-	return batches;
 }
 
 function isTransientFailure(error: unknown): boolean {
@@ -336,11 +259,10 @@ function finalReport(run: RunState): string {
 	lines.push(`- Validation: ${passed} passed, ${failedValidations.length} failed, ${skippedValidations.length} skipped.`);
 	for (const item of failedValidations) lines.push(`- **Failed:** ${oneLine(item.check, 140)}${item.reason ? ` — ${oneLine(item.reason, 180)}` : ""}`);
 	const specificSkips = skippedValidations.filter((item) => item.check.toLowerCase() !== "unspecified check");
-	for (const item of specificSkips.slice(0, 4)) lines.push(`- **Skipped:** ${oneLine(item.check, 140)}${item.reason ? ` — ${oneLine(item.reason, 180)}` : ""}`);
-	if (specificSkips.length > 4) lines.push(`- ${specificSkips.length - 4} additional validation skip${specificSkips.length - 4 === 1 ? "" : "s"}.`);
+	for (const item of specificSkips) lines.push(`- **Skipped:** ${oneLine(item.check, 140)}${item.reason ? ` — ${oneLine(item.reason, 180)}` : ""}`);
 	if (skippedValidations.some((item) => item.check.toLowerCase() === "unspecified check")) lines.push("- Some skipped validation was reported without details.");
-	const concerns = [...new Set((run.receipts.at(-1)?.concerns ?? []).filter(Boolean))];
-	for (const concern of concerns.slice(0, 3)) lines.push(`- **Concern:** ${oneLine(concern, 220)}`);
+	const concerns = [...new Set(run.receipts.flatMap((receipt) => receipt.concerns).filter(Boolean))];
+	for (const concern of concerns) lines.push(`- **Concern:** ${oneLine(concern, 220)}`);
 	for (const fallback of run.modelFallbacks) lines.push(`- **Runtime fallback:** ${oneLine(fallback, 220)}`);
 	if (unresolved > 0) lines.push("- **Action required:** Review unresolved must-fixes before merging.");
 	if (failedValidations.length === 0 && skippedValidations.length === 0 && concerns.length === 0 && unresolved === 0 && run.modelFallbacks.length === 0) {
@@ -395,6 +317,7 @@ export class PioEngine {
 			requiredDocumentPaths: [],
 			agents: [],
 			activities: [],
+			droppedActivityCount: 0,
 			receipts: [],
 			reviews: [],
 			trackedFindings: [],
@@ -837,6 +760,7 @@ export class PioEngine {
 			focus: request.focus,
 			prompt: request.prompt,
 			activities: [],
+			droppedActivityCount: 0,
 		};
 		run.agents.push(record);
 		record.backend = this.resolveBackend(run, request.role);
@@ -1270,10 +1194,18 @@ export class PioEngine {
 			details: details === undefined ? undefined : safeDetails(details),
 		};
 		run.activities.push(activity);
-		if (run.activities.length > MAX_ACTIVITY) run.activities.splice(0, run.activities.length - MAX_ACTIVITY);
+		if (run.activities.length > RETAINED_ACTIVITY_LIMIT) {
+			const dropped = run.activities.length - RETAINED_ACTIVITY_LIMIT;
+			run.activities.splice(0, dropped);
+			run.droppedActivityCount += dropped;
+		}
 		if (agent) {
 			agent.activities.push(activity);
-			if (agent.activities.length > MAX_ACTIVITY) agent.activities.splice(0, agent.activities.length - MAX_ACTIVITY);
+			if (agent.activities.length > RETAINED_ACTIVITY_LIMIT) {
+				const dropped = agent.activities.length - RETAINED_ACTIVITY_LIMIT;
+				agent.activities.splice(0, dropped);
+				agent.droppedActivityCount += dropped;
+			}
 		}
 		this.pi.appendEntry<ActivityEntryData>("pio-activity", { ...activity, role: agent?.label });
 		this.refreshUI();

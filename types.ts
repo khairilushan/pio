@@ -79,6 +79,7 @@ export interface AgentRecord {
 	output?: string;
 	error?: string;
 	activities: Activity[];
+	droppedActivityCount: number;
 	control?: AgentControl;
 }
 
@@ -156,6 +157,7 @@ export interface RunState {
 	requiredDocumentPaths: string[];
 	agents: AgentRecord[];
 	activities: Activity[];
+	droppedActivityCount: number;
 	context?: string;
 	plan?: ApprovedPlan;
 	receipts: ImplementationReceipt[];

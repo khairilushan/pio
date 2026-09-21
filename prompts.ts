@@ -48,7 +48,7 @@ export function contextPrompt(task: string, baseline: string): string {
 }
 
 export function planPrompt(task: string, baseline: string, context: string): string {
-	return `Create a repository-grounded implementation plan for this task.\n\nTask contract:\n${task}\n\nBaseline:\n${baseline}\n\nVerified context:\n${context}\n\nReturn valid JSON only:\n{\n  "objective": "...",\n  "workItems": [{\n    "id": "W1",\n    "title": "...",\n    "description": "...",\n    "files": ["likely/path"],\n    "dependencies": [],\n    "completionCriteria": ["..."],\n    "validation": ["allowed proportionate check or explicit policy skip"]\n  }],\n  "assumptions": ["..."]\n}\nUse 1-3 cohesive ordered work items by default and at most 5. Do not expand scope.`;
+	return `Create a repository-grounded implementation plan for this task.\n\nTask contract:\n${task}\n\nBaseline:\n${baseline}\n\nVerified context:\n${context}\n\nReturn valid JSON only:\n{\n  "objective": "...",\n  "workItems": [{\n    "id": "W1",\n    "title": "...",\n    "description": "...",\n    "files": ["likely/path"],\n    "dependencies": [],\n    "completionCriteria": ["..."],\n    "validation": ["allowed proportionate check or explicit policy skip"]\n  }],\n  "assumptions": ["..."]\n}\nUse the smallest cohesive set of ordered work items that fully covers the task. Do not combine unrelated changes merely to reduce the count, and do not expand scope.`;
 }
 
 export function criticPrompt(task: string, context: string, plan: ApprovedPlan, answer?: string): string {
@@ -80,7 +80,7 @@ Review rules:
 `;
 
 function focusedReviewPrompt(task: string, baseline: string, focus: string, focusStandard: string): string {
-	return `Review the current workspace changes with focus on ${focus}.\n\nTask contract:\n${task}\n\nPre-existing user-owned baseline:\n${baseline}\n${REVIEW_RULES}${focusStandard}\nReturn valid JSON only:\n{\n  "mustFixes": [{"key":"stable semantic key without line numbers","title":"...","path":"...","line":1,"impact":"...","direction":"..."}],\n  "suggestions": [{"title":"...","path":"...","reason":"..."}],\n  "questions": ["..."],\n  "summary": "..."\n}\nReturn every substantiated must-fix. Limits: 6 suggestions and 6 questions.`;
+	return `Review the current workspace changes with focus on ${focus}.\n\nTask contract:\n${task}\n\nPre-existing user-owned baseline:\n${baseline}\n${REVIEW_RULES}${focusStandard}\nReturn valid JSON only:\n{\n  "mustFixes": [{"key":"stable semantic key without line numbers","title":"...","path":"...","line":1,"impact":"...","direction":"..."}],\n  "suggestions": [{"title":"...","path":"...","reason":"..."}],\n  "questions": ["..."],\n  "summary": "..."\n}\nReturn every substantiated must-fix. Keep suggestions and questions concise and material; do not omit them solely because of their count.`;
 }
 
 export function correctnessReviewPrompt(task: string, baseline: string): string {

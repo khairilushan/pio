@@ -11,6 +11,7 @@
   ],
   "license": "MIT",
   "scripts": {
+    "test": "node --test pipeline.test.ts",
     "typecheck": "tsc"
   },
   "files": [
@@ -18,6 +19,7 @@
     "config.ts",
     "claude-code.ts",
     "engine.ts",
+    "pipeline.ts",
     "prompts.ts",
     "types.ts",
     "ui.ts",

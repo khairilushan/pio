@@ -53,10 +53,15 @@ export function renderActivityEntry(activity: Activity & { role?: string }, expa
 }
 
 export function buildLogComponent(run: RunState, agentId: string | undefined, theme: any, done: () => void) {
-	const activities = agentId ? run.activities.filter((activity) => activity.agentId === agentId) : run.activities;
+	const agent = agentId ? run.agents.find((candidate) => candidate.id === agentId) : undefined;
+	const activities = agent ? agent.activities : run.activities;
+	const dropped = agent ? agent.droppedActivityCount : run.droppedActivityCount;
 	const container = new Container();
 	container.addChild(new Text(theme.fg("accent", theme.bold(`PIO activity · ${agentId ?? run.id}`)), 1, 0));
-	container.addChild(new Text(theme.fg("dim", "Esc closes · showing complete retained activity history"), 1, 0));
+	const retention = dropped > 0
+		? `Esc closes · showing the latest ${activities.length} entries; ${dropped} older ${agent ? "agent" : "run"} entries were omitted from this in-memory view`
+		: "Esc closes · showing complete retained activity history";
+	container.addChild(new Text(theme.fg("dim", retention), 1, 0));
 	for (const activity of activities) {
 		const time = new Date(activity.timestamp).toLocaleTimeString();
 		container.addChild(new Text(`${theme.fg("dim", time)} ${activity.summary}`, 1, 0));

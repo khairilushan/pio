@@ -75,7 +75,7 @@ Run state and activity are kept in memory for the current Pi session. Reports ar
 | 2 | Gather read-only repository context |
 | 3 | Create an implementation plan |
 | 4 | Critique and approve the plan |
-| 5 | Implement up to five work items in order |
+| 5 | Implement every approved work item in order, one writer at a time |
 | 6 | Run three reviews, triage findings, and apply up to three fix rounds |
 | 7 | Inspect the workspace and write the final report |
 
@@ -89,7 +89,25 @@ The three initial reviewers use intentionally separate lenses:
 
 Their prompts explicitly tell them not to report concerns owned by another lens. They run concurrently; if any reviewer reports must-fixes, `review-triage` verifies and deduplicates them before a fixer is allowed to edit the workspace.
 
-PIO never truncates must-fixes. It retains and reports every finding, while triage, fixing, and verification process them in batches of ten to keep each agent prompt focused. Fixing still stops after three rounds; anything remaining is reported as unresolved rather than discarded. Suggestions and questions remain capped at six each.
+PIO never truncates must-fixes. It retains and reports every finding, while triage, fixing, and verification process them sequentially in batches of ten to keep each agent prompt focused. Fixing still stops after three rounds; anything remaining is retained and reported as unresolved rather than discarded. Suggestions, questions, validation skips, and receipt concerns are also retained rather than count-capped.
+
+There is no maximum plan work-item count. The planner is asked for the smallest cohesive plan, but a valid larger plan is accepted and every item is implemented sequentially. This keeps writer concurrency at one and avoids discarding a sound plan solely because of its decomposition.
+
+### Limit and safety inventory
+
+| Limit or control | Classification | Behavior and rationale |
+|---|---|---|
+| Plan work-item maximum | **Unnecessary — removed** | Plans still require at least one well-formed item, but no arbitrary maximum is enforced. Every accepted item receives a writer pass and a completion-gate receipt check. |
+| Active runs | **Safety-essential** | One run may be active per Pi session because agents share one working tree. A second run fails visibly instead of creating competing edits. |
+| Writer concurrency | **Safety-essential** | Exactly one writer runs at a time because all agents share one working tree. Larger plans consume more sequential calls, not more concurrent resources. |
+| Initial reviewer count/concurrency | **Safety-essential** | The three fixed, non-overlapping review lenses run concurrently; later triage, fixer, and verifier batches run sequentially. Peak pipeline concurrency therefore remains three. |
+| Must-fixes per triage/fix/verify call | **Gracefully batchable** | Batches contain ten findings. All batches are processed in order and flattened without count truncation. Semantic-key deduplication merges the same finding; it is not a count cap. |
+| Fix rounds | **Safety-essential** | Three rounds bound repeated autonomous edits and model cost. Findings that remain after the final round are explicitly retained as unresolved and included in the report. |
+| Planner/critic format attempts | **Safety-essential** | Each gets one format retry. Exhaustion fails visibly instead of looping forever or silently accepting malformed JSON. |
+| Transient agent retry | **Safety-essential** | A transient backend failure gets one fresh-agent retry; persistent failure stops visibly. This bounds duplicate calls and edits. |
+| Suggestions, questions, validation skips, and concerns | **Unnecessary count caps — removed** | Normalization and final reporting preserve every returned entry. Prompts still ask agents to stay concise and material. |
+| In-memory activity history | **Safety-essential** | The latest 2,000 entries per run and per agent are retained to bound session memory. `/pio-log` explicitly reports how many older entries were omitted; normal Pi activity entries are still appended as they occur. |
+| Activity detail and dashboard presentation | **Safety-essential presentation bounds** | Large detail payloads are clipped at 12,000 characters with an explicit omitted-character marker, progress summaries are limited to 240 characters, and the live dashboard shows only the two most recently completed agents. Full agent records and retained logs remain available; these display bounds do not alter plans, receipts, findings, or final-report data. |
 
 ## Backends and models
 
@@ -233,6 +251,7 @@ Use `/pio-report` to show it again during the same Pi session.
 
 ```sh
 npm install
+npm test
 npm run typecheck
 pi -e ./index.ts
 ```
